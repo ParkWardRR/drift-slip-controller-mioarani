@@ -1,7 +1,8 @@
-package protocol
+package driftslip
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"sync"
 	"time"
@@ -111,14 +112,14 @@ func (d *DriftEstimator) RecordSamples(totalSamples uint64) {
 
 	// Alert on significant drift (> 1 ppm) at most every 30 seconds.
 	if math.Abs(d.driftPPM) > 1.0 && now.Sub(d.lastAlertTime) > 30*time.Second {
-		dbg("[DRIFT] WARNING: capture clock drift %.2f ppm (peak: %.2f ppm, measurements: %d)",
+		log.Printf("[DRIFT] WARNING: capture clock drift %.2f ppm (peak: %.2f ppm, measurements: %d)\n",
 			d.driftPPM, d.peakDriftPPM, d.measurementCount)
 		d.lastAlertTime = now
 	}
 
 	// Periodic logging every 100 measurements.
 	if d.measurementCount%100 == 0 {
-		dbg("[DRIFT] drift=%.3f ppm peak=%.3f ppm measurements=%d",
+		log.Printf("[DRIFT] drift=%.3f ppm peak=%.3f ppm measurements=%d\n",
 			d.driftPPM, d.peakDriftPPM, d.measurementCount)
 	}
 

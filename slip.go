@@ -1,4 +1,4 @@
-package protocol
+package driftslip
 
 import (
 	"fmt"
@@ -86,17 +86,27 @@ func NewSlipController(mode DriftCorrectionMode, channels, bytesPerSample int) *
 	}
 }
 
+// DriftSource provides the current estimated clock drift.
+type DriftSource interface {
+	DriftPPM() float64
+}
+
 // ProcessFrame applies drift correction to a buffer of interleaved PCM samples.
 // Returns the corrected buffer (may be 1 frame shorter or longer).
 //
-// driftPPM: current estimated drift from the DriftEstimator.
+// drift: source of current estimated drift.
 // frameCount: number of frames in the buffer (samples per channel).
 //
 // The returned buffer may have frameCount±1 frames. The caller must handle
 // the variable output size (ALAC can encode variable frame counts).
-func (sc *SlipController) ProcessFrame(buf []byte, frameCount int, driftPPM float64) []byte {
+func (sc *SlipController) ProcessFrame(buf []byte, frameCount int, drift DriftSource) []byte {
 	if sc.mode == DriftCorrectionNone {
 		return buf
+	}
+
+	driftPPM := 0.0
+	if drift != nil {
+		driftPPM = drift.DriftPPM()
 	}
 
 	if sc.mode == DriftCorrectionResample {
