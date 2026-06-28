@@ -1,7 +1,6 @@
 package driftslip
 
 import (
-	"bytes"
 	"math"
 	"testing"
 )

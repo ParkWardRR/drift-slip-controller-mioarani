@@ -188,7 +188,7 @@ func (d *DriftEstimator) RecordNTPRTT(localSendTime, localRecvTime time.Time, re
 
 	// Log RTT for observability.
 	if d.measurementCount%50 == 0 {
-		dbg("[DRIFT-NTP] rtt=%v oneWay=%v", rtt, oneWay)
+		log.Printf("[DRIFT-NTP] rtt=%v oneWay=%v\n", rtt, oneWay)
 	}
 
 	// The NTP timestamp offset can be used to detect clock drift between
