@@ -16,17 +16,7 @@ This library solves the desync problem dynamically:
 - **Zero-Allocation Audio Path:** Mutates slices fully in-place when adequate capacity is provided, eliminating garbage collection pauses during drift correction.
 - **SIMD Auto-Vectorization:** Highly unrolled inner loops enable the Go compiler to seamlessly emit AVX2/NEON instructions, drastically increasing zero-crossing search speed on large buffers.
 - **Cross-Platform Purity:** 100% pure Go. No fragile `cgo` bindings or custom assembly required.
-
-## Architecture
-
-```mermaid
-graph TD;
-    A[Drift Estimator (PPM)] --> B[Accumulator];
-    B -->|±1 frame| C[Find Zero Crossing];
-    C --> D[Insert / Drop Frame];
-
-```
-
+ 
 ## Requirements
 - **Go**: Latest stable toolchain.
 - **OS Support**: Cross-platform (macOS/Linux prioritized).
