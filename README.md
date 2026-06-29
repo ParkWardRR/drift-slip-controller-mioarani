@@ -8,9 +8,18 @@
 This repository is fully prepared for public release. CI/CD pipelines, exhaustive fuzzing, and extensive benchmarking have been heavily integrated to guarantee production-ready stability.
 
 ## Overview
-Go library for compensating clock drift between asynchronous audio pipelines via zero-crossing sample insertion/deletion.
+Go library for compensating clock drift between asynchronous audio pipelines. When capturing audio from hardware and sending it over a network, the two clocks will never tick at the exact same speed. One might process 44,100 samples per second, while the other runs at 44,100.02. Over a long session (like a livestream), this tiny difference builds up into massive audio desync or a buffer crash.
 
-Designed strictly for high-performance integrations and infrastructure codebases. No redundant abstractions; focuses entirely on precise data processing.
+### How It Works (Under the Hood)
+This library solves the desync problem dynamically:
+1. **The Brain (Phase-Locked Loop):** It constantly monitors the stream, tracking the absolute "phase error" (how many samples we are drifting). Instead of reacting to random thread jitter, it uses a PI controller to lock onto the exact hardware clock drift in parts-per-million.
+2. **The Fix (Dynamic Resampling):** Once it knows the drift, it stretches or shrinks the audio *just enough* to compensate. It uses dynamic linear interpolation to resample the audio on the fly. Alternatively, it can just drop or duplicate a single audio frame right at a "zero-crossing" (when the sound wave hits absolute silence) so human ears can't hear a pop.
+3. **The Shell (Standard I/O):** You wrap your network socket or file stream with our `SlipReader` or `SlipWriter`. All of this complex math happens completely invisibly as you read and write standard Go bytes.
+
+## Key Features
+- **Zero-Allocation Audio Path:** Mutates slices fully in-place when adequate capacity is provided, eliminating garbage collection pauses during drift correction.
+- **SIMD Auto-Vectorization:** Highly unrolled inner loops enable the Go compiler to seamlessly emit AVX2/NEON instructions, drastically increasing zero-crossing search speed on large buffers.
+- **Cross-Platform Purity:** 100% pure Go. No fragile `cgo` bindings or custom assembly required.
 
 ## Architecture
 

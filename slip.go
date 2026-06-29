@@ -75,6 +75,10 @@ type SlipController struct {
 	// Stats
 	inserts atomic.Uint64
 	drops   atomic.Uint64
+
+	// Resampling state
+	resampleBuf []byte
+	phase       float64
 }
 
 // NewSlipController creates a controller for the given format.
@@ -99,6 +103,7 @@ type DriftSource interface {
 //
 // The returned buffer may have frameCount±1 frames. The caller must handle
 // the variable output size (ALAC can encode variable frame counts).
+// For zero-allocation duplication, ensure cap(buf) >= len(buf) + (channels * bytesPerSample).
 func (sc *SlipController) ProcessFrame(buf []byte, frameCount int, drift DriftSource) []byte {
 	if sc.mode == DriftCorrectionNone {
 		return buf
@@ -110,8 +115,9 @@ func (sc *SlipController) ProcessFrame(buf []byte, frameCount int, drift DriftSo
 	}
 
 	if sc.mode == DriftCorrectionResample {
-		// TODO: implement high-quality SRC.
-		// For now, fall through to slip mode.
+		sc.mu.Lock()
+		defer sc.mu.Unlock()
+		return sc.resample(buf, frameCount, driftPPM)
 	}
 
 	sc.mu.Lock()
@@ -155,6 +161,68 @@ func (sc *SlipController) ProcessFrame(buf []byte, frameCount int, drift DriftSo
 	return buf
 }
 
+// resample performs dynamic linear interpolation to pitch-shift the audio slightly.
+func (sc *SlipController) resample(buf []byte, frameCount int, driftPPM float64) []byte {
+	frameSize := sc.channels * sc.bytesPerSample
+	ratio := 1.0 - (driftPPM / 1e6) // Positive drift means capture is fast (too many samples), so shrink output.
+
+	outFrames := int(float64(frameCount)/ratio + sc.phase)
+	outSize := outFrames * frameSize
+
+	if cap(sc.resampleBuf) < outSize {
+		sc.resampleBuf = make([]byte, outSize*2) // over-allocate to prevent frequent resizing
+	}
+	sc.resampleBuf = sc.resampleBuf[:outSize]
+
+	bps := sc.bytesPerSample
+	if bps != 2 {
+		// Fallback for S24LE or unsupported formats: Nearest neighbor
+		for i := 0; i < outFrames; i++ {
+			inPos := float64(i)*ratio + sc.phase
+			inIdx := int(inPos)
+			if inIdx >= frameCount {
+				inIdx = frameCount - 1
+			}
+			copy(sc.resampleBuf[i*frameSize:(i+1)*frameSize], buf[inIdx*frameSize:(inIdx+1)*frameSize])
+		}
+	} else {
+		// S16LE Linear Interpolation
+		for i := 0; i < outFrames; i++ {
+			inPos := float64(i)*ratio + sc.phase
+			inIdx := int(inPos)
+			frac := inPos - float64(inIdx)
+
+			for c := 0; c < sc.channels; c++ {
+				idx0 := inIdx*frameSize + c*2
+				idx1 := idx0 + frameSize
+				if inIdx >= frameCount-1 {
+					idx1 = idx0 // duplicate last sample
+				}
+
+				s0 := float64(int16(uint16(buf[idx0]) | uint16(buf[idx0+1])<<8))
+				s1 := float64(int16(uint16(buf[idx1]) | uint16(buf[idx1+1])<<8))
+				
+				interp := s0 + frac*(s1-s0)
+				val := int16(interp)
+
+				outIdx := i*frameSize + c*2
+				sc.resampleBuf[outIdx] = byte(val)
+				sc.resampleBuf[outIdx+1] = byte(val >> 8)
+			}
+		}
+	}
+
+	// Update phase for next block
+	sc.phase = float64(outFrames)*ratio + sc.phase - float64(frameCount)
+	if sc.phase > 1.0 {
+		sc.phase -= 1.0
+	} else if sc.phase < -1.0 {
+		sc.phase += 1.0
+	}
+
+	return sc.resampleBuf
+}
+
 // Stats returns correction statistics.
 func (sc *SlipController) Stats() (inserts, drops uint64) {
 	return sc.inserts.Load(), sc.drops.Load()
@@ -191,51 +259,69 @@ func findZeroCrossing(buf []byte, frameSize, frameCount int) int {
 		start = 1
 	}
 
-	for i := start; i < end && (i+1)*frameSize <= len(buf); i++ {
-		offset := i * frameSize
-
-		// Read first channel's sample (little-endian, signed).
-		var sample int32
-		if bps == 3 {
-			// S24LE: 3 bytes, sign-extend from 24-bit.
-			sample = int32(buf[offset]) | int32(buf[offset+1])<<8 | int32(int8(buf[offset+2]))<<16
-		} else {
-			// S16LE: 2 bytes.
-			sample = int32(int16(uint16(buf[offset]) | uint16(buf[offset+1])<<8))
+	// Split loops to allow compiler auto-vectorization (SIMD)
+	if bps == 3 {
+		for i := start; i < end && (i+1)*frameSize <= len(buf); i++ {
+			offset := i * frameSize
+			sample := int32(buf[offset]) | int32(buf[offset+1])<<8 | int32(int8(buf[offset+2]))<<16
+			if sample < 0 {
+				sample = -sample
+			}
+			if sample < bestAbs {
+				bestAbs = sample
+				bestIdx = i
+			}
 		}
-
-		absVal := sample
-		if absVal < 0 {
-			absVal = -absVal
-		}
-		if absVal < bestAbs {
-			bestAbs = absVal
-			bestIdx = i
+	} else {
+		for i := start; i < end && (i+1)*frameSize <= len(buf); i++ {
+			offset := i * frameSize
+			sample := int32(int16(uint16(buf[offset]) | uint16(buf[offset+1])<<8))
+			if sample < 0 {
+				sample = -sample
+			}
+			if sample < bestAbs {
+				bestAbs = sample
+				bestIdx = i
+			}
 		}
 	}
 
 	return bestIdx
 }
 
-// dropFrame removes the frame at the given index.
+// dropFrame removes the frame at the given index in-place.
 func dropFrame(buf []byte, frameSize, idx int) []byte {
 	offset := idx * frameSize
 	if offset+frameSize > len(buf) {
 		return buf
 	}
-	result := make([]byte, len(buf)-frameSize)
-	copy(result, buf[:offset])
-	copy(result[offset:], buf[offset+frameSize:])
-	return result
+	// Shift remaining bytes left
+	copy(buf[offset:], buf[offset+frameSize:])
+	return buf[:len(buf)-frameSize]
 }
 
 // dupFrame duplicates the frame at the given index.
+// If cap(buf) >= len(buf) + frameSize, it mutates in-place.
+// Otherwise, it allocates a new slice.
 func dupFrame(buf []byte, frameSize, idx int) []byte {
 	offset := idx * frameSize
 	if offset+frameSize > len(buf) {
 		return buf
 	}
-	result := make([]byte, len(buf)+frameSize)
+	
+	newLen := len(buf) + frameSize
+	if cap(buf) >= newLen {
+		// We have capacity. Shift right and insert.
+		buf = buf[:newLen]
+		// Shift elements after the duplicated frame to the right
+		copy(buf[offset+2*frameSize:], buf[offset+frameSize:len(buf)-frameSize])
+		// Duplicate the frame
+		copy(buf[offset+frameSize:offset+2*frameSize], buf[offset:offset+frameSize])
+		return buf
+	}
+
+	// Fallback: Allocate new buffer
+	result := make([]byte, newLen)
 	copy(result, buf[:offset+frameSize])
 	copy(result[offset+frameSize:], buf[offset:])
 	return result

@@ -31,12 +31,11 @@ type DriftEstimator struct {
 	lastSample   uint64    // cumulative sample count at latest measurement
 
 	// Estimated drift in parts-per-million.
-	// Positive = capture is faster than session clock (producing extra samples).
-	// Negative = capture is slower (producing fewer samples).
 	driftPPM float64
 
-	// EMA smoothing factor (0.0–1.0). Lower = more smoothing.
-	alpha float64
+	// PI Controller state (Phase-Locked Loop)
+	integralError float64
+	kp, ki        float64
 
 	// Stats
 	measurementCount uint64
@@ -45,12 +44,17 @@ type DriftEstimator struct {
 
 	// Alert state
 	lastAlertTime time.Time
+
+	// NTP bounds
+	latestNTPDriftPPM float64
+	ntpMeasurements   uint64
 }
 
 // NewDriftEstimator creates a drift estimator for the given sample rate.
 func NewDriftEstimator(sampleRate int) *DriftEstimator {
 	return &DriftEstimator{
-		alpha:      0.05, // slow EMA — drift changes slowly
+		kp:         0.1,    // Proportional gain
+		ki:         0.001,  // Integral gain
 		sampleRate: sampleRate,
 	}
 }
@@ -98,11 +102,21 @@ func (d *DriftEstimator) RecordSamples(totalSamples uint64) {
 	ratio := actualSamples / expectedSamples
 	instantPPM := (ratio - 1.0) * 1e6
 
-	// EMA update.
-	if d.measurementCount <= 2 {
-		d.driftPPM = instantPPM
-	} else {
-		d.driftPPM = d.driftPPM*(1.0-d.alpha) + instantPPM*d.alpha
+	// PI Controller (PLL) update based on instantaneous phase error
+	d.integralError += instantPPM * d.ki
+	d.driftPPM = (instantPPM * d.kp) + d.integralError
+
+	// Apply NTP bounds if we have NTP sync
+	if d.ntpMeasurements > 5 {
+		// Constrain drift to be within 50 PPM of the NTP estimated drift
+		const maxNTPDeviation = 50.0
+		if d.driftPPM > d.latestNTPDriftPPM+maxNTPDeviation {
+			d.driftPPM = d.latestNTPDriftPPM + maxNTPDeviation
+			d.integralError = d.driftPPM - (instantPPM * d.kp) // anti-windup
+		} else if d.driftPPM < d.latestNTPDriftPPM-maxNTPDeviation {
+			d.driftPPM = d.latestNTPDriftPPM - maxNTPDeviation
+			d.integralError = d.driftPPM - (instantPPM * d.kp) // anti-windup
+		}
 	}
 
 	// Track peak.
@@ -186,12 +200,18 @@ func (d *DriftEstimator) RecordNTPRTT(localSendTime, localRecvTime time.Time, re
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	d.ntpMeasurements++
+
 	// Log RTT for observability.
 	if d.measurementCount%50 == 0 {
 		log.Printf("[DRIFT-NTP] rtt=%v oneWay=%v\n", rtt, oneWay)
 	}
 
-	// The NTP timestamp offset can be used to detect clock drift between
-	// our session clock and the receiver's clock. This is a secondary
-	// signal — the primary signal is capture sample counting.
+	// Pseudo-NTP offset calculation:
+	// A real implementation maps the remoteNTPTimestamp to the local clock.
+	// We simulate extracting a bounded PPM drift metric.
+	// For now, we assume the remote clock has 0 drift relative to monotonic,
+	// so the target is 0.0 PPM.
+	// Downstream callers would inject the true remote clock offset here.
+	d.latestNTPDriftPPM = 0.0 
 }
