@@ -2,11 +2,7 @@
 
 ![Language](https://img.shields.io/badge/Language-Go-blue.svg)
 ![License](https://img.shields.io/badge/License-BlueOak_1.0.0-green.svg)
-![Status](https://img.shields.io/badge/Status-Production_Ready-brightgreen.svg)
-
-## Release Status
-This repository is fully prepared for public release. CI/CD pipelines, exhaustive fuzzing, and extensive benchmarking have been heavily integrated to guarantee production-ready stability.
-
+ 
 ## Overview
 Go library for compensating clock drift between asynchronous audio pipelines. When capturing audio from hardware and sending it over a network, the two clocks will never tick at the exact same speed. One might process 44,100 samples per second, while the other runs at 44,100.02. Over a long session (like a livestream), this tiny difference builds up into massive audio desync or a buffer crash.
 
